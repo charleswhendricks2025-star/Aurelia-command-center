@@ -1,77 +1,93 @@
+
 /**
- * AURELIA COMMAND CENTER - CORE OPERATIONAL ENGINE
- * Milestone 1: Production Runtime
- * Client-Side BYOK Security | Single-Call Structured JSON | Web Speech | Blob Deliverables
+ * AURELIA COMMAND CENTER
+ * Corrected Gemini connection, model discovery, memory, voice,
+ * agent coordination, task tracking, and downloadable deliverables.
  */
 
 (function () {
   'use strict';
 
-  // Storage Identifiers
+  // ============================================================
+  // 1. CONFIGURATION AND STATE
+  // ============================================================
+
   const STORAGE_KEY = 'aurelia_system_state';
   const API_KEY_STORAGE = 'aurelia_gemini_api_key';
+  const API_BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
-  // Operational State
+  const DEFAULT_MODEL = 'gemini-2.5-flash';
+
   let state = {
     missions: [],
     tasks: [],
     deliverables: [],
-    model: 'gemini-2.5-flash'
+    model: DEFAULT_MODEL
   };
 
   let apiKey = '';
   let recognition = null;
   let isListening = false;
+  let availableModels = [];
+  let isBusy = false;
 
-  // DOM Elements - Navigation & Status
-  const keyIndicator = document.getElementById('key-indicator');
-  const voiceIndicator = document.getElementById('voice-indicator');
-  const systemReadout = document.getElementById('system-readout');
-  const memoryStatusText = document.getElementById('memory-status-text');
+  // ============================================================
+  // 2. DOM REFERENCES
+  // ============================================================
 
-  // DOM Elements - Agent Status Pills
-  const pillWatch = document.getElementById('pill-watch');
-  const pillResearch = document.getElementById('pill-research');
-  const pillBusiness = document.getElementById('pill-business');
-  const pillBuilder = document.getElementById('pill-builder');
+  const $ = id => document.getElementById(id);
 
-  // DOM Elements - Panels & Lists
-  const taskList = document.getElementById('task-list');
-  const deliverablesList = document.getElementById('deliverables-list');
-  const taskCounter = document.getElementById('task-counter');
-  const deliverableCounter = document.getElementById('deliverable-counter');
-  const terminalLog = document.getElementById('terminal-log');
+  const keyIndicator = $('key-indicator');
+  const voiceIndicator = $('voice-indicator');
+  const systemReadout = $('system-readout');
+  const memoryStatusText = $('memory-status-text');
 
-  // DOM Elements - Command Bar
-  const commandInput = document.getElementById('command-input');
-  const sendBtn = document.getElementById('send-btn');
-  const micBtn = document.getElementById('mic-btn');
+  const pillWatch = $('pill-watch');
+  const pillResearch = $('pill-research');
+  const pillBusiness = $('pill-business');
+  const pillBuilder = $('pill-builder');
 
-  // DOM Elements - Configuration Modal
-  const settingsToggleBtn = document.getElementById('settings-toggle-btn');
-  const settingsModal = document.getElementById('settings-modal');
-  const modalCloseBtn = document.getElementById('modal-close-btn');
-  const apiKeyInput = document.getElementById('api-key-input');
-  const modelSelect = document.getElementById('model-select');
-  const saveKeyBtn = document.getElementById('save-key-btn');
-  const deleteKeyBtn = document.getElementById('delete-key-btn');
-  const exportMemoryBtn = document.getElementById('export-memory-btn');
-  const importMemoryFile = document.getElementById('import-memory-file');
+  const taskList = $('task-list');
+  const deliverablesList = $('deliverables-list');
+  const taskCounter = $('task-counter');
+  const deliverableCounter = $('deliverable-counter');
+  const terminalLog = $('terminal-log');
 
-  // =========================================================================
-  // 1. INITIALIZATION & STORAGE ENGINE
-  // =========================================================================
+  const commandInput = $('command-input');
+  const sendBtn = $('send-btn');
+  const micBtn = $('mic-btn');
 
-  function init() {
+  const settingsToggleBtn = $('settings-toggle-btn');
+  const settingsModal = $('settings-modal');
+  const modalCloseBtn = $('modal-close-btn');
+  const apiKeyInput = $('api-key-input');
+  const modelSelect = $('model-select');
+  const saveKeyBtn = $('save-key-btn');
+  const deleteKeyBtn = $('delete-key-btn');
+  const exportMemoryBtn = $('export-memory-btn');
+  const importMemoryFile = $('import-memory-file');
+
+  // ============================================================
+  // 3. INITIALIZATION
+  // ============================================================
+
+  async function init() {
     loadKey();
     loadState();
     setupSpeech();
     bindEvents();
     renderAll();
+
+    logTerminal('SYS_INIT', 'AURELIA core initialized.');
+
+    if (apiKey) {
+      await discoverModels();
+    }
   }
 
   function loadKey() {
     apiKey = localStorage.getItem(API_KEY_STORAGE) || '';
+
     if (apiKey) {
       keyIndicator.textContent = 'API KEY: SECURED';
       keyIndicator.className = 'status-badge badge-ok';
@@ -85,46 +101,161 @@
   function loadState() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
+
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') {
-          state.missions = Array.isArray(parsed.missions) ? parsed.missions : [];
-          state.tasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
-          state.deliverables = Array.isArray(parsed.deliverables) ? parsed.deliverables : [];
-          state.model = parsed.model || 'gemini-1.5-flash';
-          modelSelect.value = state.model;
-        }
+
+        state.missions = Array.isArray(parsed.missions)
+          ? parsed.missions : [];
+
+        state.tasks = Array.isArray(parsed.tasks)
+          ? parsed.tasks : [];
+
+        // Do not trust an old saved model identifier.
+        // The available model list will determine the active model.
+        state.model = DEFAULT_MODEL;
       }
-    } catch (e) {
-      logTerminal('SYS_WARN', 'Local memory check failed. Starting clean profile.');
+    } catch (error) {
+      logTerminal('SYS_WARN', 'Saved memory could not be loaded.');
     }
+
     updateMemoryReadout();
   }
 
   function saveState() {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      const saved = {
+        missions: state.missions,
+        tasks: state.tasks,
+        model: state.model
+      };
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
       updateMemoryReadout();
-    } catch (e) {
-      logTerminal('SYS_ERR', 'Memory write failed: Local browser storage limit reached.');
+    } catch (error) {
+      logTerminal('SYS_ERR', 'Unable to save local memory.');
     }
   }
 
   function updateMemoryReadout() {
-    const missionCount = state.missions.length;
-    memoryStatusText.textContent = `Local Storage: Active (${missionCount} mission${missionCount === 1 ? '' : 's'} recorded)`;
+    if (!memoryStatusText) return;
+
+    const count = state.missions.length;
+
+    memoryStatusText.textContent =
+      `Local Storage: Active (${count} mission${count === 1 ? '' : 's'} recorded)`;
   }
 
-  // =========================================================================
-  // 2. EVENT BINDINGS
-  // =========================================================================
+  // ============================================================
+  // 4. GEMINI MODEL DISCOVERY
+  // ============================================================
+
+  async function discoverModels() {
+    if (!apiKey) return;
+
+    try {
+      const response = await fetch(`${API_BASE}/models`, {
+        method: 'GET',
+        headers: {
+          'x-goog-api-key': apiKey
+        }
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          data.error?.message || `Model discovery failed: HTTP ${response.status}`
+        );
+      }
+
+      availableModels = (data.models || [])
+        .filter(model =>
+          Array.isArray(model.supportedGenerationMethods) &&
+          model.supportedGenerationMethods.includes('generateContent')
+        )
+        .map(model => model.name.replace(/^models\//, ''));
+
+      if (!availableModels.length) {
+        throw new Error('Google returned no models supporting generateContent.');
+      }
+
+      populateModelSelect();
+
+      logTerminal(
+        'SYS_MODEL',
+        `${availableModels.length} compatible Gemini models discovered.`
+      );
+
+    } catch (error) {
+      logTerminal(
+        'SYS_WARN',
+        `Model discovery unavailable: ${error.message}`,
+        'error-entry'
+      );
+
+      // Keep a fallback. The actual request will report whether it works.
+      if (modelSelect && modelSelect.options.length === 0) {
+        addModelOption(DEFAULT_MODEL);
+      }
+    }
+  }
+
+  function populateModelSelect() {
+    if (!modelSelect) return;
+
+    const previousValue = modelSelect.value;
+    modelSelect.innerHTML = '';
+
+    const preferred = [
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-2.5-flash-lite',
+      'gemini-2.0-flash-lite'
+    ];
+
+    const ordered = [
+      ...preferred.filter(name => availableModels.includes(name)),
+      ...availableModels
+        .filter(name => !preferred.includes(name))
+        .filter(name => /flash/i.test(name))
+    ];
+
+    const uniqueModels = [...new Set(ordered)];
+
+    uniqueModels.forEach(addModelOption);
+
+    const chosen =
+      uniqueModels.includes(previousValue) ? previousValue :
+      uniqueModels.includes(state.model) ? state.model :
+      uniqueModels[0];
+
+    if (chosen) {
+      modelSelect.value = chosen;
+      state.model = chosen;
+      saveState();
+    }
+  }
+
+  function addModelOption(modelName) {
+    if (!modelSelect) return;
+
+    const option = document.createElement('option');
+    option.value = modelName;
+    option.textContent = modelName;
+    modelSelect.appendChild(option);
+  }
+
+  // ============================================================
+  // 5. EVENT BINDINGS
+  // ============================================================
 
   function bindEvents() {
     sendBtn.addEventListener('click', handleCommand);
-    
-    commandInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
+
+    commandInput.addEventListener('keydown', event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
         handleCommand();
       }
     });
@@ -139,82 +270,95 @@
       settingsModal.classList.add('hidden');
     });
 
-    saveKeyBtn.addEventListener('click', () => {
-      const inputVal = apiKeyInput.value.trim();
-      if (!inputVal) {
+    saveKeyBtn.addEventListener('click', async () => {
+      const inputValue = apiKeyInput.value.trim();
+
+      if (!inputValue) {
         alert('Please enter a valid Gemini API key.');
         return;
       }
-      apiKey = inputVal;
-      state.model = modelSelect.value;
+
+      apiKey = inputValue;
       localStorage.setItem(API_KEY_STORAGE, apiKey);
-      saveState();
-      loadKey();
+
+      keyIndicator.textContent = 'API KEY: SECURED';
+      keyIndicator.className = 'status-badge badge-ok';
+
       settingsModal.classList.add('hidden');
-      logTerminal('SYS_AUTH', 'Gemini API credential locked in local browser memory.');
+
+      logTerminal('SYS_AUTH', 'API key saved in browser storage.');
+
+      await discoverModels();
     });
 
     deleteKeyBtn.addEventListener('click', () => {
-      if (confirm('Permanently delete the Gemini API Key from this browser?')) {
-        apiKey = '';
-        localStorage.removeItem(API_KEY_STORAGE);
-        apiKeyInput.value = '';
-        loadKey();
-        settingsModal.classList.add('hidden');
-        logTerminal('SYS_AUTH', 'API Key deleted from local browser storage.');
-      }
+      if (!confirm('Delete the Gemini API key from this browser?')) return;
+
+      apiKey = '';
+      localStorage.removeItem(API_KEY_STORAGE);
+      apiKeyInput.value = '';
+
+      keyIndicator.textContent = 'API KEY: MISSING';
+      keyIndicator.className = 'status-badge badge-warning';
+
+      settingsModal.classList.add('hidden');
+
+      logTerminal('SYS_AUTH', 'API key deleted.');
     });
 
-    exportMemoryBtn.addEventListener('click', exportMemory);
-    importMemoryFile.addEventListener('change', importMemory);
+    if (exportMemoryBtn) {
+      exportMemoryBtn.addEventListener('click', exportMemory);
+    }
+
+    if (importMemoryFile) {
+      importMemoryFile.addEventListener('change', importMemory);
+    }
   }
 
-  // =========================================================================
-  // 3. BROWSER WEB SPEECH ENGINE (STT & TTS)
-  // =========================================================================
+  // ============================================================
+  // 6. VOICE ENGINE
+  // ============================================================
 
   function setupSpeech() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      recognition = new SpeechRecognition();
-      recognition.continuous = false;
-      recognition.interimResults = false;
-      recognition.lang = 'en-US';
+    const SpeechRecognition =
+      window.SpeechRecognition || window.webkitSpeechRecognition;
 
-      recognition.onstart = () => {
-        isListening = true;
-        micBtn.classList.add('btn-mic-active');
-        voiceIndicator.textContent = 'VOICE: LISTENING...';
-        voiceIndicator.className = 'status-badge badge-ok';
-      };
-
-      recognition.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        commandInput.value = transcript;
-        handleCommand();
-      };
-
-      recognition.onerror = () => {
-        stopSpeech();
-      };
-
-      recognition.onend = () => {
-        stopSpeech();
-      };
-    } else {
+    if (!SpeechRecognition) {
       voiceIndicator.textContent = 'VOICE: UNSUPPORTED';
       micBtn.style.display = 'none';
+      return;
     }
+
+    recognition = new SpeechRecognition();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = 'en-US';
+
+    recognition.onstart = () => {
+      isListening = true;
+      micBtn.classList.add('btn-mic-active');
+      voiceIndicator.textContent = 'VOICE: LISTENING...';
+      voiceIndicator.className = 'status-badge badge-ok';
+    };
+
+    recognition.onresult = event => {
+      commandInput.value = event.results[0][0].transcript;
+      handleCommand();
+    };
+
+    recognition.onerror = stopSpeech;
+    recognition.onend = stopSpeech;
   }
 
   function toggleSpeech() {
     if (!recognition) return;
+
     if (isListening) {
       recognition.stop();
     } else {
       try {
         recognition.start();
-      } catch (err) {
+      } catch (error) {
         stopSpeech();
       }
     }
@@ -227,222 +371,391 @@
     voiceIndicator.className = 'status-badge';
   }
 
-  function speakText(text) {
+  function speakText(message) {
     if (!('speechSynthesis' in window)) return;
+
     window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
+
+    const utterance = new SpeechSynthesisUtterance(message);
     const voices = window.speechSynthesis.getVoices();
-    const selectedVoice = voices.find(v => v.name.includes('Google') && v.lang.startsWith('en')) || voices[0];
+
+    const selectedVoice =
+      voices.find(voice =>
+        voice.name.includes('Google') &&
+        voice.lang.startsWith('en')
+      ) || voices[0];
+
     if (selectedVoice) utterance.voice = selectedVoice;
+
     utterance.rate = 1.05;
-    utterance.pitch = 1.0;
+    utterance.pitch = 1;
+
     window.speechSynthesis.speak(utterance);
   }
 
-  // =========================================================================
-  // 4. PIPELINE: GEMINI DISPATCH & AGENT COORDINATION
-  // =========================================================================
+  // ============================================================
+  // 7. COMMAND HANDLING
+  // ============================================================
 
   async function handleCommand() {
     const prompt = commandInput.value.trim();
-    if (!prompt) return;
+
+    if (!prompt || isBusy) return;
 
     if (!apiKey) {
-      logTerminal('SECURITY', 'Action halted. Configure your Gemini API key in Config first.', 'error-entry');
+      logTerminal(
+        'SECURITY',
+        'Configure the Gemini API key before sending commands.',
+        'error-entry'
+      );
+
       settingsModal.classList.remove('hidden');
       return;
     }
 
     commandInput.value = '';
-    logTerminal('LORD', prompt, 'user-entry');
+    logTerminal('LORD', escapeHTML(prompt), 'user-entry');
+
     systemReadout.textContent = 'COORDINATING AGENTS...';
     systemReadout.className = 'readout-busy';
+
+    isBusy = true;
     sendBtn.disabled = true;
 
     try {
-      const response = await callGeminiRouter(prompt);
-      processResponse(response);
+      const result = await callGeminiRouter(prompt);
+      processResponse(result);
     } catch (error) {
-      logTerminal('SYS_ERR', `Execution failed: ${error.message}`, 'error-entry');
+      logTerminal(
+        'SYS_ERR',
+        escapeHTML(error.message),
+        'error-entry'
+      );
     } finally {
+      isBusy = false;
       systemReadout.textContent = 'SYSTEM STANDING BY';
       systemReadout.className = 'readout-idle';
       sendBtn.disabled = false;
     }
   }
 
-  async function callGeminiRouter(userDirective) {
-    const selectedModel = state.model || 'gemini-2.5-flash';
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${apiKey}`;
+  // ============================================================
+  // 8. GEMINI API REQUEST
+  // ============================================================
 
-    const systemPrompt = `You are AURELIA, an executive AI Command Center coordinating four specialized agents:
-1. WATCH: Tracks tasks, schedules, deadlines, and operational risk.
-2. RESEARCH: Investigates external questions, verifies data, and notes sources.
-3. BUSINESS: Evaluates economics, unit profitability, expenses, and pricing logic.
-   - Core pricing rule: Pre-Tax Quote = Total True Cost / (1 - Target Margin %).
-   - Verified Estimator Breakdown:
-     * Direct Labor = (Onsite Hours + Travel Hours) * Hourly Pay Rate
-     * Expenses = Materials * (1 + Handling Markup) + Equipment + (Miles * Mileage Rate)
-     * Overhead Burden = Total Hours * Hourly Overhead Rate
-     * Contingency Reserve = (Direct Labor + Expenses + Overhead) * Contingency %
-     * Total True Cost = Direct Labor + Expenses + Overhead + Contingency
-     * Pre-Tax Quote = Total True Cost / (1 - Target Margin %)
-     * Sales Tax = Pre-Tax Quote * Tax Rate
-     * Total Client Quote = Pre-Tax Quote + Sales Tax
-     * Net Business Profit = Pre-Tax Quote - Total True Cost
-4. BUILDER: Generates tangible deliverables (CSV spreadsheets, Markdown documentation, JSON schemas, or web code).
+  function buildSystemPrompt() {
+    return `You are AURELIA, an executive AI Command Center coordinating four specialized agents.
 
-CRITICAL REQUIREMENT:
-You must respond ONLY with a raw, valid JSON object (no markdown formatting, no code fences, no backticks, no prefix or suffix text) conforming to this JSON structure:
+AGENTS:
+
+1. WATCH:
+Tracks tasks, deadlines, schedules, progress, and operational risks.
+
+2. RESEARCH:
+Investigates questions, validates information, and distinguishes verified facts from assumptions.
+
+3. BUSINESS:
+Evaluates costs, revenue, margins, pricing, and business economics.
+
+Pricing rules:
+Pre-Tax Quote = Total True Cost / (1 - Target Margin)
+
+Direct Labor = (Onsite Hours + Travel Hours) * Hourly Pay Rate
+
+Expenses = Materials * (1 + Handling Markup) + Equipment + (Miles * Mileage Rate)
+
+Overhead = Total Hours * Hourly Overhead Rate
+
+Contingency = (Direct Labor + Expenses + Overhead) * Contingency Percentage
+
+Total True Cost = Direct Labor + Expenses + Overhead + Contingency
+
+Sales Tax = Pre-Tax Quote * Tax Rate
+
+Client Quote = Pre-Tax Quote + Sales Tax
+
+Net Business Profit = Pre-Tax Quote - Total True Cost
+
+Never invent missing financial inputs. State assumptions.
+
+4. BUILDER:
+Creates practical deliverables including CSV files, spreadsheets, documentation, JSON, and website code.
+
+OPERATING RULES:
+
+- Address the owner as Lord.
+- Respect a $0 budget unless explicitly authorized otherwise.
+- Never claim an action succeeded unless it actually did.
+- Never claim a task is completed unless the work was produced.
+- Ask for approval before paid, irreversible, or external actions.
+- Explain uncertainty and assumptions.
+- Keep the four agent roles distinct.
+- You are one coordinated AI system, not four independent AI services.
+
+RESPONSE FORMAT:
+
+Return ONLY valid JSON matching this structure:
+
 {
-  "spoken_summary": "1-2 concise, executive sentences read aloud via text-to-speech.",
-  "executive_report": "Comprehensive status report directly addressing Lord.",
+  "spoken_summary": "One or two concise sentences.",
+  "executive_report": "Detailed report addressing Lord.",
   "agent_contributions": {
-    "watch": "Task logging and risk assessment notes.",
-    "research": "Market context and validation details.",
-    "business": "Reconciled numbers, cost floor, margins, and profit breakdown.",
-    "builder": "Construction notes on the generated deliverable."
+    "watch": "Watch agent findings.",
+    "research": "Research agent findings.",
+    "business": "Business agent findings.",
+    "builder": "Builder agent findings."
   },
   "task_updates": [
     {
       "id": "TASK-001",
-      "title": "Clear task description",
-      "status": "completed",
+      "title": "Task description",
+      "status": "active",
       "assigned_to": "BUILDER"
     }
   ],
   "deliverable": {
-    "has_deliverable": true,
-    "filename": "Contractor_Estimator.csv",
-    "mime_type": "text/csv",
-    "content": "Raw string content of the deliverable file"
+    "has_deliverable": false,
+    "filename": "",
+    "mime_type": "",
+    "content": ""
   }
 }
-If no deliverable file is required by the directive, set "has_deliverable" to false, "filename" to "", "mime_type" to "", and "content" to "".`;
+
+For tasks without a deliverable, use false and empty strings.
+
+For a requested deliverable, include its complete contents as a string and use an appropriate MIME type.
+
+Valid task statuses are active, pending, and completed.
+
+Do not claim a deliverable was created unless its full contents are included.`;
+  }
+
+  async function callGeminiRouter(userDirective) {
+    const selectedModel =
+      modelSelect?.value ||
+      (availableModels.includes(state.model) ? state.model : '') ||
+      availableModels[0] ||
+      DEFAULT_MODEL;
+
+    state.model = selectedModel;
+    saveState();
+
+    const endpoint =
+      `${API_BASE}/models/${encodeURIComponent(selectedModel)}:generateContent`;
 
     const requestPayload = {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            { text: systemPrompt },
-            { text: `ACTIVE TASKS STATE:\n${JSON.stringify(state.tasks)}\n\nLORD'S DIRECTIVE: ${userDirective}` }
-          ]
-        }
-      ],
+      systemInstruction: {
+        parts: [{ text: buildSystemPrompt() }]
+      },
+      contents: [{
+        role: 'user',
+        parts: [{
+          text:
+            `ACTIVE TASKS:\n${JSON.stringify(state.tasks)}\n\n` +
+            `RECENT MISSIONS:\n${JSON.stringify(state.missions.slice(0, 5))}\n\n` +
+            `LORD'S DIRECTIVE:\n${userDirective}`
+        }]
+      }],
       generationConfig: {
         temperature: 0.15,
-        responseMimeType: "application/json"
+        responseMimeType: 'application/json'
       }
     };
 
     let response;
+
     try {
       response = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey
+        },
         body: JSON.stringify(requestPayload)
       });
-    } catch (networkErr) {
-      throw new Error('Network connection failed. Verify internet connectivity.');
+    } catch (error) {
+      throw new Error(
+        'Network connection failed. Check your internet connection.'
+      );
+    }
+
+    const responseText = await response.text();
+
+    let data;
+
+    try {
+      data = JSON.parse(responseText);
+    } catch (error) {
+      throw new Error(
+        `Google returned an unreadable response (HTTP ${response.status}).`
+      );
     }
 
     if (!response.ok) {
-      if (response.status === 400) throw new Error('HTTP 400: Bad Request or invalid model payload.');
-      if (response.status === 403) throw new Error('HTTP 403: Authentication rejected. Gemini API key is invalid.');
-      if (response.status === 429) throw new Error('HTTP 429: Quota exhausted on Gemini free tier. Please wait 60 seconds.');
-      if (response.status >= 500) throw new Error(`HTTP ${response.status}: Google API service error.`);
-      throw new Error(`Google API returned status ${response.status}`);
+      const googleMessage =
+        data.error?.message || 'No additional error details supplied.';
+
+      const googleStatus =
+        data.error?.status || 'UNKNOWN';
+
+      throw new Error(
+        `Google API HTTP ${response.status} (${googleStatus}): ${googleMessage}`
+      );
     }
 
-    const data = await response.json();
-    if (!data.candidates || !data.candidates[0].content || !data.candidates[0].content.parts[0].text) {
-      throw new Error('Empty candidate response received from Gemini.');
+    const output =
+      data.candidates?.[0]?.content?.parts
+        ?.map(part => part.text || '')
+        .join('')
+        .trim();
+
+    if (!output) {
+      const reason =
+        data.promptFeedback?.blockReason ||
+        data.candidates?.[0]?.finishReason ||
+        'No text returned';
+
+      throw new Error(`Gemini returned no usable text: ${reason}`);
     }
 
-    let rawOutput = data.candidates[0].content.parts[0].text.trim();
-    if (rawOutput.startsWith('```json')) rawOutput = rawOutput.substring(7);
-    if (rawOutput.startsWith('```')) rawOutput = rawOutput.substring(3);
-    if (rawOutput.endsWith('```')) rawOutput = rawOutput.substring(0, rawOutput.length - 3);
+    let cleanOutput = output
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
 
     try {
-      return JSON.parse(rawOutput.trim());
-    } catch (parseErr) {
-      throw new Error('Model produced malformed JSON. Request could not be parsed.');
+      return JSON.parse(cleanOutput);
+    } catch (error) {
+      throw new Error(
+        'Gemini responded, but its output was not valid JSON.'
+      );
     }
   }
 
-  function processResponse(res) {
-    // 1. Spoken Audio Feedback
-    if (res.spoken_summary) {
-      speakText(res.spoken_summary);
+  // ============================================================
+  // 9. PROCESS GEMINI RESPONSE
+  // ============================================================
+
+  function processResponse(result) {
+    if (!result || typeof result !== 'object') {
+      throw new Error('Invalid response structure.');
     }
 
-    // 2. Terminal Logging
-    let formattedLog = `<strong>${res.executive_report}</strong>`;
-    if (res.agent_contributions) {
-      formattedLog += `<br><br><small style="color:var(--text-muted); line-height:1.6;">`;
-      if (res.agent_contributions.watch) formattedLog += `&bull; <strong>WATCH:</strong> ${res.agent_contributions.watch}<br>`;
-      if (res.agent_contributions.research) formattedLog += `&bull; <strong>RESEARCH:</strong> ${res.agent_contributions.research}<br>`;
-      if (res.agent_contributions.business) formattedLog += `&bull; <strong>BUSINESS:</strong> ${res.agent_contributions.business}<br>`;
-      if (res.agent_contributions.builder) formattedLog += `&bull; <strong>BUILDER:</strong> ${res.agent_contributions.builder}`;
-      formattedLog += `</small>`;
+    if (result.spoken_summary) {
+      speakText(result.spoken_summary);
     }
-    logTerminal('AURELIA', formattedLog, 'aurelia-entry');
 
-    // 3. Task State Reconciliation
-    if (res.task_updates && Array.isArray(res.task_updates)) {
-      res.task_updates.forEach(incoming => {
-        const index = state.tasks.findIndex(t => t.id === incoming.id);
-        if (index !== -1) {
+    const report = result.executive_report || 'No executive report supplied.';
+
+    logTerminal(
+      'AURELIA',
+      `<strong>${escapeHTML(report)}</strong>`,
+      'aurelia-entry'
+    );
+
+    const contributions = result.agent_contributions || {};
+
+    const agents = [
+      ['WATCH', contributions.watch, pillWatch],
+      ['RESEARCH', contributions.research, pillResearch],
+      ['BUSINESS', contributions.business, pillBusiness],
+      ['BUILDER', contributions.builder, pillBuilder]
+    ];
+
+    agents.forEach(([name, contribution, pill]) => {
+      if (contribution) {
+        logTerminal(
+          name,
+          escapeHTML(contribution),
+          'aurelia-entry'
+        );
+      }
+
+      if (pill) {
+        pill.classList.add('agent-active');
+        setTimeout(() => pill.classList.remove('agent-active'), 1800);
+      }
+    });
+
+    if (Array.isArray(result.task_updates)) {
+      result.task_updates.forEach(incoming => {
+        if (!incoming || !incoming.id || !incoming.title) return;
+
+        const index = state.tasks.findIndex(
+          task => task.id === incoming.id
+        );
+
+        if (index >= 0) {
           state.tasks[index] = incoming;
         } else {
           state.tasks.unshift(incoming);
         }
       });
+
       renderTasks();
     }
 
-    // 4. Physical Deliverable Construction (Blob Engine)
-    if (res.deliverable && res.deliverable.has_deliverable && res.deliverable.content) {
-      registerDeliverable(res.deliverable.filename, res.deliverable.mime_type, res.deliverable.content);
+    if (
+      result.deliverable?.has_deliverable === true &&
+      result.deliverable.content
+    ) {
+      registerDeliverable(
+        result.deliverable.filename,
+        result.deliverable.mime_type,
+        result.deliverable.content
+      );
     }
 
-    // 5. Memory State Persistence
     state.missions.unshift({
       timestamp: new Date().toISOString(),
-      report: res.executive_report
+      report: report
     });
+
     saveState();
   }
 
-  // =========================================================================
-  // 5. DELIVERABLE STORAGE & BLOB DOWNLOAD GENERATOR
-  // =========================================================================
+  // ============================================================
+  // 10. DOWNLOADABLE DELIVERABLES
+  // ============================================================
 
   function registerDeliverable(filename, mimeType, content) {
     const cleanMime = mimeType || 'text/plain';
-    const blob = new Blob([content], { type: cleanMime });
-    const downloadUrl = URL.createObjectURL(blob);
 
-    const deliverable = {
+    const blob = new Blob([content], { type: cleanMime });
+    const url = URL.createObjectURL(blob);
+
+    const item = {
       id: 'DELIV-' + Date.now(),
       filename: filename || 'aurelia_deliverable.txt',
       mimeType: cleanMime,
       size: (blob.size / 1024).toFixed(1) + ' KB',
-      url: downloadUrl,
+      url: url,
       createdAt: new Date().toLocaleTimeString()
     };
 
-    state.deliverables.unshift(deliverable);
+    state.deliverables.unshift(item);
     renderDeliverables();
 
-    logTerminal('BUILDER', `Artifact <strong>${deliverable.filename}</strong> (${deliverable.size}) produced and ready for download.`, 'aurelia-entry');
+    logTerminal(
+      'BUILDER',
+      `Artifact ${escapeHTML(item.filename)} generated and ready for download.`
+    );
   }
 
-  // =========================================================================
-  // 6. UI RENDERING ENGINES
-  // =========================================================================
+  // ============================================================
+  // 11. SAFE DISPLAY HELPERS
+  // ============================================================
+
+  function escapeHTML(value) {
+    return String(value).replace(/[&<>"']/g, character => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    })[character]);
+  }
 
   function renderAll() {
     renderTasks();
@@ -451,62 +764,104 @@ If no deliverable file is required by the directive, set "has_deliverable" to fa
 
   function renderTasks() {
     taskList.innerHTML = '';
-    if (!state.tasks || state.tasks.length === 0) {
-      taskList.innerHTML = '<div class="empty-state">No active missions. Awaiting Lord\'s command.</div>';
+
+    if (!state.tasks.length) {
+      taskList.textContent =
+        "No active missions. Awaiting Lord's command.";
+
       taskCounter.textContent = '0 TASKS';
       return;
     }
 
     taskCounter.textContent = `${state.tasks.length} TASKS`;
+
     state.tasks.forEach(task => {
       const card = document.createElement('div');
-      const statusClass = (task.status === 'completed') ? 'completed' : 'active';
-      card.className = `task-card ${statusClass}`;
-      card.innerHTML = `
-        <div class="task-meta">
-          <span>${task.id}</span>
-          <span>${task.assigned_to}</span>
-          <span style="color:${task.status === 'completed' ? 'var(--success)' : 'var(--warning)'}">${task.status.toUpperCase()}</span>
-        </div>
-        <div class="task-title">${task.title}</div>
-      `;
+      card.className =
+        `task-card ${task.status === 'completed' ? 'completed' : 'active'}`;
+
+      const meta = document.createElement('div');
+      meta.className = 'task-meta';
+
+      [task.id, task.assigned_to, task.status?.toUpperCase() || 'ACTIVE']
+        .forEach(value => {
+          const span = document.createElement('span');
+          span.textContent = value || '';
+          meta.appendChild(span);
+        });
+
+      const title = document.createElement('div');
+      title.className = 'task-title';
+      title.textContent = task.title || 'Untitled task';
+
+      card.append(meta, title);
       taskList.appendChild(card);
     });
   }
 
   function renderDeliverables() {
     deliverablesList.innerHTML = '';
-    if (!state.deliverables || state.deliverables.length === 0) {
-      deliverablesList.innerHTML = '<div class="empty-state">No deliverables generated yet.</div>';
+
+    if (!state.deliverables.length) {
+      deliverablesList.textContent = 'No deliverables generated yet.';
       deliverableCounter.textContent = '0 FILES';
       return;
     }
 
-    deliverableCounter.textContent = `${state.deliverables.length} FILES`;
+    deliverableCounter.textContent =
+      `${state.deliverables.length} FILES`;
+
     state.deliverables.forEach(item => {
       const card = document.createElement('div');
       card.className = 'deliverable-card';
-      card.innerHTML = `
-        <div class="deliverable-name">${item.filename}</div>
-        <div class="deliverable-type">${item.mimeType} &bull; ${item.size} &bull; ${item.createdAt}</div>
-        <a href="${item.url}" download="${item.filename}" class="btn btn-gold btn-small" style="text-align:center; text-decoration:none; display:block;">DOWNLOAD FILE</a>
-      `;
+
+      const name = document.createElement('div');
+      name.className = 'deliverable-name';
+      name.textContent = item.filename;
+
+      const details = document.createElement('div');
+      details.className = 'deliverable-type';
+      details.textContent =
+        `${item.mimeType} • ${item.size} • ${item.createdAt}`;
+
+      const link = document.createElement('a');
+      link.href = item.url;
+      link.download = item.filename;
+      link.className = 'btn btn-gold btn-small';
+      link.style.cssText =
+        'text-align:center;text-decoration:none;display:block;';
+      link.textContent = 'DOWNLOAD FILE';
+
+      card.append(name, details, link);
       deliverablesList.appendChild(card);
     });
   }
 
   function logTerminal(sender, message, styleClass = '') {
+    if (!terminalLog) return;
+
     const entry = document.createElement('div');
     entry.className = `log-entry ${styleClass}`;
-    const time = new Date().toLocaleTimeString();
-    entry.innerHTML = `<span class="log-timestamp">[${time}]</span> <span class="log-agent-tag">${sender}:</span> ${message}`;
+
+    const timestamp = document.createElement('span');
+    timestamp.className = 'log-timestamp';
+    timestamp.textContent = `[${new Date().toLocaleTimeString()}] `;
+
+    const tag = document.createElement('span');
+    tag.className = 'log-agent-tag';
+    tag.textContent = `${sender}: `;
+
+    const body = document.createElement('span');
+    body.innerHTML = message;
+
+    entry.append(timestamp, tag, body);
     terminalLog.appendChild(entry);
     terminalLog.scrollTop = terminalLog.scrollHeight;
   }
 
-  // =========================================================================
-  // 7. MEMORY EXPORT / IMPORT ENGINE
-  // =========================================================================
+  // ============================================================
+  // 12. MEMORY EXPORT AND IMPORT
+  // ============================================================
 
   function exportMemory() {
     const memoryData = {
@@ -517,44 +872,76 @@ If no deliverable file is required by the directive, set "has_deliverable" to fa
       model: state.model
     };
 
-    const blob = new Blob([JSON.stringify(memoryData, null, 2)], { type: 'application/json' });
+    const blob = new Blob(
+      [JSON.stringify(memoryData, null, 2)],
+      { type: 'application/json' }
+    );
+
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `aurelia_memory_${Date.now()}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    const link = document.createElement('a');
+
+    link.href = url;
+    link.download = `aurelia_memory_${Date.now()}.json`;
+
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+
     URL.revokeObjectURL(url);
-    logTerminal('SYS_MEM', 'Core Memory backup snapshot exported to disk.');
+
+    logTerminal('SYS_MEM', 'Memory backup exported.');
   }
 
   function importMemory(event) {
-    const file = event.target.files[0];
+    const file = event.target.files?.[0];
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+
+    reader.onload = () => {
       try {
-        const imported = JSON.parse(e.target.result);
-        if (Array.isArray(imported.tasks) && Array.isArray(imported.missions)) {
-          state.tasks = imported.tasks;
-          state.missions = imported.missions;
-          if (imported.model) state.model = imported.model;
-          saveState();
-          renderAll();
-          logTerminal('SYS_MEM', 'Core Memory snapshot successfully loaded into runtime.');
-        } else {
-          throw new Error('Structure does not conform to AURELIA memory schema.');
+        const imported = JSON.parse(reader.result);
+
+        if (
+          !Array.isArray(imported.tasks) ||
+          !Array.isArray(imported.missions)
+        ) {
+          throw new Error('Invalid AURELIA memory file.');
         }
-      } catch (err) {
-        logTerminal('SYS_ERR', `Import failed: ${err.message}`, 'error-entry');
+
+        state.tasks = imported.tasks;
+        state.missions = imported.missions;
+
+        // Model is selected from Google's current available model list.
+        saveState();
+        renderAll();
+
+        logTerminal('SYS_MEM', 'Memory successfully imported.');
+      } catch (error) {
+        logTerminal(
+          'SYS_ERR',
+          escapeHTML(`Memory import failed: ${error.message}`),
+          'error-entry'
+        );
       }
     };
+
     reader.readAsText(file);
     event.target.value = '';
   }
 
-  // Self-Bootstrap
-  window.addEventListener('DOMContentLoaded', init);
+  // ============================================================
+  // 13. STARTUP
+  // ============================================================
+
+  window.addEventListener('DOMContentLoaded', () => {
+    init().catch(error => {
+      logTerminal(
+        'SYS_FATAL',
+        escapeHTML(error.message),
+        'error-entry'
+      );
+    });
+  });
+
 })();

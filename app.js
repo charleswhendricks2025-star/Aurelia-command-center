@@ -272,7 +272,7 @@
   }
 
   async function callGeminiRouter(userDirective) {
-    const selectedModel = state.model || 'gemini-1.5-flash';
+    const selectedModel = state.model || 'gemini-2.5-flash';
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${apiKey}`;
 
     const systemPrompt = `You are AURELIA, an executive AI Command Center coordinating four specialized agents:

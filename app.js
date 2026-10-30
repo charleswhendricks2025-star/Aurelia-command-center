@@ -16,7 +16,7 @@
     missions: [],
     tasks: [],
     deliverables: [],
-    model: 'gemini-1.5-flash'
+    model: 'gemini-2.5-flash'
   };
 
   let apiKey = '';
